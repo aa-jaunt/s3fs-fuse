@@ -188,6 +188,24 @@ bool CacheFileStat::Release(void)
   return true;
 }
 
+ReadAhead::ReadAhead()
+{
+  position = 0;
+  size     = 0;
+}
+
+long ReadAhead::addData(char * data, long length) {
+  ASSERT(length+size<=MAX_BUFFER_SIZE);
+  
+}
+long ReadAhead::readData(char* data, long length) {
+  long add = length > MAX_BUFFER_SIZE 
+}
+
+long ReadAhead::readyForMore(){
+  return size < MIN_SIZE_BUFFER ? (MAX_SIZE_BUFFER - size) : 0;
+}
+
 //------------------------------------------------
 // PageList methods
 //------------------------------------------------
