@@ -187,19 +187,75 @@ bool CacheFileStat::Release(void)
 
   return true;
 }
-
-ReadAhead::ReadAhead()
+static S3Status getObjectDataCallback(int bufferSize, const char *buffer, void *callbackData)
 {
-  position = 0;
-  size     = 0;
+  ReadAhead * reader = (ReadAhead *) callbackData;
+  memcpy(buffer, reader->buffer, bufferSize);
+  if (bufferSize != capacity) {
+    eof = true;
+  }
+  this->size = bufferSize;
+  return S3StatusOK;
+
 }
 
-long ReadAhead::addData(char * data, long length) {
-  ASSERT(length+size<=MAX_BUFFER_SIZE);
-  
+ReadAhead::ReadAhead() {
+  initialize(0);
 }
-long ReadAhead::readData(char* data, long length) {
-  long add = length > MAX_BUFFER_SIZE 
+
+long ReadAhead::initialize(long offset) {
+  position     = 0;
+  size         = 0;
+  file_offset  = offset;
+  capacity     = MAX_BUFFER_SIZE;
+  eof = false;
+}
+
+void ReadAhead::repopulate(long offset) {
+  // here we repopulate buffer to capacity starting from offset point
+  S3_get_object(&bucketContext, sample_key, NULL, offset, capacity, NULL, &getObjectHandler, this); 
+  return; 
+}
+long ReadAhead::readData(char* data, long offset, long length) {
+  if (offset < 0) {
+      return 0;
+  }
+  long delta_offset = offset -file_offset;
+  
+  if ( delta_offset < 0 || delta_offset >= size) {
+      initialize(offset);
+      return readData(data, offset, length);
+  } else if ( delta_offset < size && delta_offset != 0) {
+      position = (position + delta_offset)%capacity;
+      size -= delta_offset;
+      file_offset = offset;
+      return readData(data, offset, length);
+  }
+
+  // at this point file_offset == offset and size >= 0
+  if ( length <= size ) {
+      // this is simple, just copy data possible in two steps because of data wrap
+      long endpoint = position + length;
+      if (endpoint < capacity) {
+          memcpy(buffer+position, data, length);
+      } else {
+          long part2 = endpoint%capacity;
+          memcpy(buffer+position, data, length-part2);
+          memcpy(buffer, data+length-part2, part2); 
+      } 
+      return length;
+  } 
+   // read whatever in the buffer now and then reinitialize and repopulate buffer
+   readData(data, offset, size);
+   offset += size;
+   data   += size;
+   repopulate(offset);
+   if ( size < capacity ) {
+      //reached end of file
+      return readData(data, offset, size);
+   }
+   long part_length = readData(data, offset, length -size);
+   return size + part_length;
 }
 
 long ReadAhead::readyForMore(){
