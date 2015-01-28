@@ -41,11 +41,14 @@
 #include "common.h"
 #include "fdcache.h"
 #include "s3fs.h"
+
+#include "libs3.h"
 #include "s3fs_util.h"
 #include "string_util.h"
 #include "curl.h"
 
 using namespace std;
+
 
 //------------------------------------------------
 // Symbols
@@ -190,20 +193,26 @@ bool CacheFileStat::Release(void)
 static S3Status getObjectDataCallback(int bufferSize, const char *buffer, void *callbackData)
 {
   ReadAhead * reader = (ReadAhead *) callbackData;
-  memcpy(buffer, reader->buffer, bufferSize);
-  if (bufferSize != capacity) {
-    eof = true;
+  memcpy(reader->buffer, buffer, bufferSize);
+  if (bufferSize != reader->capacity) {
+    reader->eof = true;
   }
-  this->size = bufferSize;
+  reader->size = bufferSize;
   return S3StatusOK;
 
 }
 
 ReadAhead::ReadAhead() {
+  S3Status status;
+    
+  if ((status = S3_initialize("s3", S3_INIT_ALL, "s3.amazonaws.com")) != S3StatusOK) {
+        fprintf(stderr, "Failed to initialize libs3: %s\n", 
+                S3_get_status_name(status));
+  }
   initialize(0);
 }
 
-long ReadAhead::initialize(long offset) {
+void ReadAhead::initialize(long offset) {
   position     = 0;
   size         = 0;
   file_offset  = offset;
@@ -211,9 +220,29 @@ long ReadAhead::initialize(long offset) {
   eof = false;
 }
 
+S3ResponseHandler responseHandler =
+{
+        0,
+        0
+};
+S3GetObjectHandler getObjectHandler =
+{
+        responseHandler,
+        &getObjectDataCallback
+};
 void ReadAhead::repopulate(long offset) {
   // here we repopulate buffer to capacity starting from offset point
-  S3_get_object(&bucketContext, sample_key, NULL, offset, capacity, NULL, &getObjectHandler, this); 
+  S3BucketContext bucketContext =
+    {
+        0,
+        "medusa.jauntvr.com",
+        S3ProtocolHTTP,
+        S3UriStylePath,
+        "",
+        ""
+    };
+
+  S3_get_object(&bucketContext, "test", NULL, offset, capacity, NULL, &getObjectHandler, this); 
   return; 
 }
 long ReadAhead::readData(char* data, long offset, long length) {
@@ -237,11 +266,11 @@ long ReadAhead::readData(char* data, long offset, long length) {
       // this is simple, just copy data possible in two steps because of data wrap
       long endpoint = position + length;
       if (endpoint < capacity) {
-          memcpy(buffer+position, data, length);
+          memcpy(data, buffer + position, length);
       } else {
           long part2 = endpoint%capacity;
-          memcpy(buffer+position, data, length-part2);
-          memcpy(buffer, data+length-part2, part2); 
+          memcpy(data, buffer + position,  length-part2);
+          memcpy(data+length-part2, buffer, part2); 
       } 
       return length;
   } 
@@ -256,10 +285,6 @@ long ReadAhead::readData(char* data, long offset, long length) {
    }
    long part_length = readData(data, offset, length -size);
    return size + part_length;
-}
-
-long ReadAhead::readyForMore(){
-  return size < MIN_SIZE_BUFFER ? (MAX_SIZE_BUFFER - size) : 0;
 }
 
 //------------------------------------------------

@@ -19,8 +19,7 @@
  */
 #ifndef FD_CACHE_H_
 #define FD_CACHE_H_
-#define MAX_BUFFER_SIZE = 20*1024*1024
-#define MIN_BUFFER_SIZE = 10*1024*1024
+#define MAX_BUFFER_SIZE 100*1024*1024
 //------------------------------------------------
 // CacheFileStat
 //------------------------------------------------
@@ -97,17 +96,19 @@ class PageList
 
 class ReadAhead
 {
-  private:
+  public:
     char buffer[MAX_BUFFER_SIZE];
     long position;
     long size;  
-  public:
+    long file_offset;
+    long capacity;
+    bool eof;
     ReadAhead();
     ~ReadAhead();
-    long addData(char * data, long length);
-    long readData(char* data, long length);
-    long readyForMore();
-}
+    void initialize(long offset);
+    void repopulate(long offset);
+    long readData(char* data, long offset, long length);
+};
 //------------------------------------------------
 // class FdEntity
 //------------------------------------------------
