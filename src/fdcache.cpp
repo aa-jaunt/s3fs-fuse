@@ -356,14 +356,14 @@ int PageList::GetUninitPages(fdpage_list_t& uninit_list, off_t start, off_t size
       // after start pos
       if(!(*iter)->init){
         // found uninitialized area
-        fdpage_list_t::reverse_iterator riter = uninit_list.rbegin();
-        if(riter != uninit_list.rend() && (*riter)->next() == (*iter)->offset){
+        //fdpage_list_t::reverse_iterator riter = uninit_list.rbegin();
+        //if(riter != uninit_list.rend() && (*riter)->next() == (*iter)->offset){
           // merge to before page
-          (*riter)->bytes += (*iter)->bytes;
-        }else{
+          //(*riter)->bytes += (*iter)->bytes;
+        //}else{
           fdpage* page = new fdpage((*iter)->offset, (*iter)->bytes, false);
           uninit_list.push_back(page);
-        }
+        //}
       }
     }
   }
