@@ -346,7 +346,7 @@ static int get_object_attribute(const char* path, struct stat* pstbuf, headers_t
     pstat->st_gid   = is_s3fs_gid ? s3fs_gid : mp_gid;
     return 0;
   }
-
+/*
   // Check cache.
   strpath = path;
   if(overcheck && string::npos != (Pos = strpath.find("_$folder$", 0))){
@@ -363,7 +363,7 @@ static int get_object_attribute(const char* path, struct stat* pstbuf, headers_t
     // there is the path in the cache for no object, it is no object.
     return -ENOENT;
   }
-
+*/
   // At first, check path
   strpath     = path;
   result      = s3fscurl.HeadRequest(strpath.c_str(), (*pheader));
