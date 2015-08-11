@@ -19,6 +19,7 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/time.h>
@@ -54,7 +55,7 @@ using namespace std;
 // Symbols
 //------------------------------------------------
 #define MAX_MULTIPART_CNT   10000                   // S3 multipart max count
-#define	FDPAGE_SIZE	    (50 * 1024 * 1024)      // 50MB(parallel uploading is 5 parallel(default) * 10 MB)
+#define FDPAGE_SIZE         (50 * 1024 * 1024)      // 50MB(parallel uploading is 5 parallel(default) * 10 MB)
 
 //------------------------------------------------
 // CacheFileStat class methods
@@ -443,21 +444,25 @@ bool PageList::FindUninitPage(off_t start, off_t& resstart, size_t& ressize)
   return false;
 }
 
-int PageList::GetUninitPages(fdpage_list_t& uninit_list, off_t start)
+int PageList::GetUninitPages(fdpage_list_t& uninit_list, off_t start, off_t size)
 {
   for(fdpage_list_t::iterator iter = pages.begin(); iter != pages.end(); iter++){
     if(start <= (*iter)->end()){
+      if((start + size) <= (*iter)->offset){
+        // reach to end
+        break;
+      }
       // after start pos
       if(!(*iter)->init){
         // found uninitialized area
-        fdpage_list_t::reverse_iterator riter = uninit_list.rbegin();
-        if(riter != uninit_list.rend() && (*riter)->next() == (*iter)->offset){
+        //fdpage_list_t::reverse_iterator riter = uninit_list.rbegin();
+        //if(riter != uninit_list.rend() && (*riter)->next() == (*iter)->offset){
           // merge to before page
-          (*riter)->bytes += (*iter)->bytes;
-        }else{
+          //(*riter)->bytes += (*iter)->bytes;
+        //}else{
           fdpage* page = new fdpage((*iter)->offset, (*iter)->bytes, false);
           uninit_list.push_back(page);
-        }
+        //}
       }
     }
   }
@@ -889,7 +894,7 @@ int FdEntity::Load(off_t start, off_t size)
 
   // check loaded area & load
   fdpage_list_t uninit_list;
-  if(0 < pagelist.GetUninitPages(uninit_list, start)){
+  if(0 < pagelist.GetUninitPages(uninit_list, start, size)){
     for(fdpage_list_t::iterator iter = uninit_list.begin(); iter != uninit_list.end(); iter++){
       if(-1 != size && (start + size) <= (*iter)->offset){
         break;
@@ -1089,6 +1094,24 @@ ssize_t FdEntity::Write(const char* bytes, off_t start, size_t size)
 }
 
 //------------------------------------------------
+// FdManager symbol
+//------------------------------------------------
+// [NOTE]
+// NOCACHE_PATH_PREFIX symbol needs for not using cache mode.
+// Now s3fs I/F functions in s3fs.cpp has left the processing
+// to FdManager and FdEntity class. FdManager class manages
+// the list of local file stat and file discriptor in conjunction
+// with the FdEntity class.
+// When s3fs is not using local cache, it means FdManager must
+// return new temporary file discriptor at each opening it.
+// Then FdManager caches fd by key which is dummy file path
+// instead of real file path.
+// This process may not be complete, but it is easy way can
+// be realized.
+//
+#define NOCACHE_PATH_PREFIX_FORM    " __S3FS_UNEXISTED_PATH_%lx__ / "      // important space words for simply
+
+//------------------------------------------------
 // FdManager class valiable
 //------------------------------------------------
 FdManager       FdManager::singleton;
@@ -1181,6 +1204,16 @@ bool FdManager::MakeCachePath(const char* path, string& cache_path, bool is_crea
   return true;
 }
 
+bool FdManager::MakeRandomTempPath(const char* path, string& tmppath)
+{
+  char szBuff[64];
+
+  sprintf(szBuff, NOCACHE_PATH_PREFIX_FORM, random());     // warry for performance, but maybe don't warry.
+  tmppath  = szBuff;
+  tmppath += path ? path : "";
+  return true;
+}
+
 //------------------------------------------------
 // FdManager methods
 //------------------------------------------------
@@ -1221,9 +1254,9 @@ FdManager::~FdManager()
   }
 }
 
-FdEntity* FdManager::GetFdEntity(const char* path)
+FdEntity* FdManager::GetFdEntity(const char* path, int existfd)
 {
-  FPRNINFO("[path=%s]", SAFESTRPTR(path));
+  FPRNINFO("[path=%s][fd=%d]", SAFESTRPTR(path), existfd);
 
   if(!path || '\0' == path[0]){
     return NULL;
@@ -1231,10 +1264,24 @@ FdEntity* FdManager::GetFdEntity(const char* path)
   AutoLock auto_lock(&FdManager::fd_manager_lock);
 
   fdent_map_t::iterator iter = fent.find(string(path));
-  if(fent.end() == iter){
-    return NULL;
+  if(fent.end() != iter && (-1 == existfd || (*iter).second->GetFd() == existfd)){
+    return (*iter).second;
   }
-  return (*iter).second;
+
+  if(-1 != existfd){
+    for(iter = fent.begin(); iter != fent.end(); iter++){
+      if((*iter).second && (*iter).second->GetFd() == existfd){
+        // found opend fd in map
+        if(0 == strcmp((*iter).second->GetPath(), path)){
+          return (*iter).second;
+        }
+        // found fd, but it is used another file(file discriptor is recycled)
+        // so returns NULL.
+        break;
+      }
+    }
+  }
+  return NULL;
 }
 
 FdEntity* FdManager::Open(const char* path, off_t size, time_t time, bool force_tmpfile, bool is_create)
@@ -1263,8 +1310,22 @@ FdEntity* FdManager::Open(const char* path, off_t size, time_t time, bool force_
     }
     // make new obj
     ent = new FdEntity(path, cache_path.c_str());
-    fent[string(path)] = ent;
 
+    if(0 < cache_path.size()){
+      // using cache
+      fent[string(path)] = ent;
+    }else{
+      // not using cache, so the key of fdentity is set not really existsing path.
+      // (but not strictly unexisting path.)
+      //
+      // [NOTE]
+      // The reason why this process here, please look at the definition of the
+      // comments of NOCACHE_PATH_PREFIX_FORM symbol.
+      //
+      string tmppath("");
+      FdManager::MakeRandomTempPath(path, tmppath);
+      fent[tmppath] = ent;
+    }
   }else{
     return NULL;
   }
@@ -1272,6 +1333,37 @@ FdEntity* FdManager::Open(const char* path, off_t size, time_t time, bool force_
   // open
   if(-1 == ent->Open(size, time)){
     return NULL;
+  }
+  return ent;
+}
+
+FdEntity* FdManager::ExistOpen(const char* path, int existfd)
+{
+  FPRNINFO("[path=%s][fd=%d]", SAFESTRPTR(path), existfd);
+
+  // search by real path
+  FdEntity* ent = Open(path, -1, -1, false, false);
+
+  if(!ent && -1 != existfd){
+    // search from all fdentity because of not using cache.
+    AutoLock auto_lock(&FdManager::fd_manager_lock);
+
+    for(fdent_map_t::iterator iter = fent.begin(); iter != fent.end(); iter++){
+      if((*iter).second && (*iter).second->GetFd() == existfd && (*iter).second->IsOpen()){
+        // found opend fd in map
+        if(0 == strcmp((*iter).second->GetPath(), path)){
+          ent = (*iter).second;
+          // open
+          if(-1 == ent->Open(-1, -1)){
+            return NULL;
+          }
+        }else{
+          // found fd, but it is used another file(file discriptor is recycled)
+          // so returns NULL.
+        }
+        break;
+      }
+    }
   }
   return ent;
 }

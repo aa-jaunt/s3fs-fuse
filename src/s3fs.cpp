@@ -84,10 +84,12 @@ bool foreground                   = false;
 bool foreground2                  = false;
 bool nomultipart                  = false;
 bool pathrequeststyle             = false;
+bool is_specified_endpoint        = false;
 std::string program_name;
 std::string service_path          = "/";
 std::string host                  = "http://s3.amazonaws.com";
 std::string bucket                = "";
+std::string endpoint              = "us-east-1";
 
 //-------------------------------------------------------------------
 // Static valiables
@@ -95,6 +97,8 @@ std::string bucket                = "";
 static uid_t mp_uid               = 0;    // owner of mount point(only not specified uid opt)
 static gid_t mp_gid               = 0;    // group of mount point(only not specified gid opt)
 static mode_t mp_mode             = 0;    // mode of mount point
+static mode_t mp_umask            = 0;    // umask for mount point
+static bool is_mp_umask           = false;// default does not set.
 static std::string mountpoint;
 static std::string passwd_file    = "";
 static bool utility_mode          = false;
@@ -110,6 +114,7 @@ static bool is_s3fs_uid           = false;// default does not set.
 static bool is_s3fs_gid           = false;// default does not set.
 static bool is_s3fs_umask         = false;// default does not set.
 static bool is_remove_cache       = false;
+static bool create_bucket         = false;
 
 //-------------------------------------------------------------------
 // Static functions : prototype
@@ -180,6 +185,7 @@ static int s3fs_read(const char* path, char* buf, size_t size, off_t offset, str
 static int s3fs_write(const char* path, const char* buf, size_t size, off_t offset, struct fuse_file_info* fi);
 static int s3fs_statfs(const char* path, struct statvfs* stbuf);
 static int s3fs_flush(const char* path, struct fuse_file_info* fi);
+static int s3fs_fsync(const char* path, int datasync, struct fuse_file_info* fi);
 static int s3fs_release(const char* path, struct fuse_file_info* fi);
 static int s3fs_opendir(const char* path, struct fuse_file_info* fi);
 static int s3fs_readdir(const char* path, void* buf, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info* fi);
@@ -340,7 +346,7 @@ static int get_object_attribute(const char* path, struct stat* pstbuf, headers_t
     pstat->st_gid   = is_s3fs_gid ? s3fs_gid : mp_gid;
     return 0;
   }
-
+/*
   // Check cache.
   strpath = path;
   if(overcheck && string::npos != (Pos = strpath.find("_$folder$", 0))){
@@ -357,7 +363,7 @@ static int get_object_attribute(const char* path, struct stat* pstbuf, headers_t
     // there is the path in the cache for no object, it is no object.
     return -ENOENT;
   }
-
+*/
   // At first, check path
   strpath     = path;
   result      = s3fscurl.HeadRequest(strpath.c_str(), (*pheader));
@@ -776,6 +782,16 @@ static int s3fs_readlink(const char* path, char* buf, size_t size)
   S3FS_MALLOCTRIM(0);
 
   return 0;
+}
+
+static int do_create_bucket(void)
+{
+  FPRNNN("/");
+
+  headers_t meta;
+
+  S3fsCurl s3fscurl(true);
+  return s3fscurl.PutRequest("/", meta, -1);    // fd=-1 means for creating zero byte object.
 }
 
 // common function for creation of a plain object
@@ -1938,7 +1954,7 @@ static int s3fs_read(const char* path, char* buf, size_t size, off_t offset, str
   FPRNINFO("[path=%s][size=%zu][offset=%jd][fd=%llu]", path, size, (intmax_t)offset, (unsigned long long)(fi->fh));
 
   FdEntity* ent;
-  if(NULL == (ent = FdManager::get()->ExistOpen(path))){
+  if(NULL == (ent = FdManager::get()->ExistOpen(path, static_cast<int>(fi->fh)))){
     DPRN("could not find opened fd(%s)", path);
     return -EIO;
   }
@@ -1969,7 +1985,7 @@ static int s3fs_write(const char* path, const char* buf, size_t size, off_t offs
   FPRNINFO("[path=%s][size=%zu][offset=%jd][fd=%llu]", path, size, (intmax_t)offset, (unsigned long long)(fi->fh));
 
   FdEntity* ent;
-  if(NULL == (ent = FdManager::get()->ExistOpen(path))){
+  if(NULL == (ent = FdManager::get()->ExistOpen(path, static_cast<int>(fi->fh)))){
     DPRN("could not find opened fd(%s)", path);
     return -EIO;
   }
@@ -2015,7 +2031,7 @@ static int s3fs_flush(const char* path, struct fuse_file_info* fi)
   }
 
   FdEntity* ent;
-  if(NULL != (ent = FdManager::get()->ExistOpen(path))){
+  if(NULL != (ent = FdManager::get()->ExistOpen(path, static_cast<int>(fi->fh)))){
     headers_t meta;
     if(0 != (result = get_object_attribute(path, NULL, &meta))){
       FdManager::get()->Close(ent);
@@ -2026,6 +2042,38 @@ static int s3fs_flush(const char* path, struct fuse_file_info* fi)
     time_t ent_mtime;
     if(ent->GetMtime(ent_mtime)){
       if(str(ent_mtime) != meta["x-amz-meta-mtime"]){
+        meta["x-amz-meta-mtime"] = str(ent_mtime);
+      }
+    }
+    result = ent->Flush(meta, false);
+    FdManager::get()->Close(ent);
+  }
+  S3FS_MALLOCTRIM(0);
+
+  return result;
+}
+
+// [NOTICE]
+// Assumption is a valid fd.
+//
+static int s3fs_fsync(const char* path, int datasync, struct fuse_file_info* fi)
+{
+  int result = 0;
+
+  FPRN("[path=%s][fd=%llu]", path, (unsigned long long)(fi->fh));
+
+  FdEntity* ent;
+  if(NULL != (ent = FdManager::get()->ExistOpen(path, static_cast<int>(fi->fh)))){
+    headers_t meta;
+    if(0 != (result = get_object_attribute(path, NULL, &meta))){
+      FdManager::get()->Close(ent);
+      return result;
+    }
+
+    // If datasync is not zero, only flush data without meta updating.
+    time_t ent_mtime;
+    if(ent->GetMtime(ent_mtime)){
+      if(0 == datasync && str(ent_mtime) != meta["x-amz-meta-mtime"]){
         meta["x-amz-meta-mtime"] = str(ent_mtime);
       }
     }
@@ -2052,7 +2100,7 @@ static int s3fs_release(const char* path, struct fuse_file_info* fi)
   }
 
   FdEntity* ent;
-  if(NULL == (ent = FdManager::get()->GetFdEntity(path))){
+  if(NULL == (ent = FdManager::get()->GetFdEntity(path, static_cast<int>(fi->fh)))){
     DPRN("could not find fd(file=%s)", path);
     return -EIO;
   }
@@ -2063,7 +2111,7 @@ static int s3fs_release(const char* path, struct fuse_file_info* fi)
 
   // check - for debug
   if(debug){
-    if(NULL != (ent = FdManager::get()->GetFdEntity(path))){
+    if(NULL != (ent = FdManager::get()->GetFdEntity(path, static_cast<int>(fi->fh)))){
       DPRNNN("Warning - file(%s),fd(%d) is still opened.", path, ent->GetFd());
     }
   }
@@ -2261,7 +2309,9 @@ static int list_bucket(const char* path, S3ObjList& head, const char* delimiter,
 {
   int       result; 
   string    s3_realpath;
-  string    query;
+  string    query_delimiter;;
+  string    query_prefix;;
+  string    query_maxkey;;
   string    next_marker = "";
   bool      truncated = true;
   S3fsCurl  s3fscurl;
@@ -2271,31 +2321,34 @@ static int list_bucket(const char* path, S3ObjList& head, const char* delimiter,
   FPRNN("[path=%s]", path);
 
   if(delimiter && 0 < strlen(delimiter)){
-    query += "delimiter=";
-    query += delimiter;
-    query += "&";
+    query_delimiter += "delimiter=";
+    query_delimiter += delimiter;
+    query_delimiter += "&";
   }
-  query += "prefix=";
 
+  query_prefix += "&prefix=";
   s3_realpath = get_realpath(path);
   if(0 == s3_realpath.length() || '/' != s3_realpath[s3_realpath.length() - 1]){
     // last word must be "/"
-    query += urlEncode(s3_realpath.substr(1) + "/");
+    query_prefix += urlEncode(s3_realpath.substr(1) + "/");
   }else{
-    query += urlEncode(s3_realpath.substr(1));
+    query_prefix += urlEncode(s3_realpath.substr(1));
   }
   if (check_content_only){
-    query += "&max-keys=1";
+    query_maxkey += "max-keys=1";
   }else{
-    query += "&max-keys=1000";
+    query_maxkey += "max-keys=1000";
   }
 
   while(truncated){
-    string each_query = query;
+    string each_query = query_delimiter;
     if(next_marker != ""){
-      each_query += "&marker=" + urlEncode(next_marker);
+      each_query += "marker=" + urlEncode(next_marker) + "&";
       next_marker = "";
     }
+    each_query += query_maxkey;
+    each_query += query_prefix;
+
     // request
     if(0 != (result = s3fscurl.ListBucketRequest(path, each_query.c_str()))){
       DPRN("ListBucketRequest returns with error.");
@@ -2673,6 +2726,10 @@ static void* s3fs_init(struct fuse_conn_info* conn)
     exit(EXIT_FAILURE);
   }
 
+  if (create_bucket){
+    do_create_bucket();
+  }
+
   // Check Bucket
   // If the network is up, check for valid credentials and if the bucket
   // exists. skip check if mounting a public bucket
@@ -2684,9 +2741,11 @@ static void* s3fs_init(struct fuse_conn_info* conn)
   }
 
   // Investigate system capabilities
+  #ifndef __APPLE__
   if((unsigned int)conn->capable & FUSE_CAP_ATOMIC_O_TRUNC){
      conn->want |= FUSE_CAP_ATOMIC_O_TRUNC;
   }
+  #endif
   // cache
   if(is_remove_cache && !FdManager::DeleteCacheDirectory()){
     DPRNINFO("Could not inilialize cache directory.");
@@ -2973,6 +3032,41 @@ static int s3fs_utility_mode(void)
   return result;
 }
 
+//
+// If calling with wrong region, s3fs gets following error body as 400 erro code.
+// "<Error><Code>AuthorizationHeaderMalformed</Code><Message>The authorization header is 
+//  malformed; the region 'us-east-1' is wrong; expecting 'ap-northeast-1'</Message>
+//  <Region>ap-northeast-1</Region><RequestId>...</RequestId><HostId>...</HostId>
+//  </Error>"
+//
+// So this is cheep codes but s3fs should get correct reagion automatically.
+//
+static bool check_region_error(const char* pbody, string& expectregion)
+{
+  if(!pbody){
+    return false;
+  }
+  const char* region;
+  const char* regionend;
+  if(NULL == (region = strcasestr(pbody, "<Message>The authorization header is malformed; the region "))){
+    return false;
+  }
+  if(NULL == (region = strcasestr(region, "expecting \'"))){
+    return false;
+  }
+  region += strlen("expecting \'");
+  if(NULL == (regionend = strchr(region, '\''))){
+    return false;
+  }
+  string strtmp(region, (regionend - region));
+  if(0 == strtmp.length()){
+    return false;
+  }
+  expectregion = strtmp;
+
+  return true;
+}
+
 static int s3fs_check_service(void)
 {
   FPRN("check services.");
@@ -2984,12 +3078,68 @@ static int s3fs_check_service(void)
   }
 
   S3fsCurl s3fscurl;
-  if(0 != s3fscurl.CheckBucket()){
+  if(-1 == s3fscurl.CheckBucket()){
     fprintf(stderr, "%s: Failed to access bucket.\n", program_name.c_str());
     return EXIT_FAILURE;
   }
   long responseCode = s3fscurl.GetLastResponseCode();
 
+  if(responseCode == 400){
+    if(!S3fsCurl::IsSignatureV4()){
+      // signature version 2
+      fprintf(stderr, "%s: Bad Request\n", program_name.c_str());
+      return EXIT_FAILURE;
+    }
+    if(is_specified_endpoint){
+      // if specifies endpoint, do not retry to connect.
+      fprintf(stderr, "%s: Bad Request\n", program_name.c_str());
+      return EXIT_FAILURE;
+    }
+
+    // check region error for signature version 4
+    BodyData* body = s3fscurl.GetBodyData();
+    string    expectregion;
+    if(check_region_error(body->str(), expectregion)){
+      // not specified endpoint, so try to connect to expected region.
+      LOWSYSLOGPRINT(LOG_ERR, "Could not connect wrong region %s, so retry to connect region %s.", endpoint.c_str(), expectregion.c_str());
+      FPRN("Could not connect wrong region %s, so retry to connect region %s.", endpoint.c_str(), expectregion.c_str());
+      endpoint = expectregion;
+      if (S3fsCurl::IsSignatureV4()) {
+          if (host == "http://s3.amazonaws.com") {
+              host = "http://s3-" + endpoint + ".amazonaws.com";
+          } else if (host == "https://s3.amazonaws.com") {
+              host = "https://s3-" + endpoint + ".amazonaws.com";
+          }
+      }
+
+      // retry to check
+      s3fscurl.DestroyCurlHandle();
+      if(-1 == s3fscurl.CheckBucket()){
+        fprintf(stderr, "%s: Failed to access bucket.\n", program_name.c_str());
+        return EXIT_FAILURE;
+      }
+      responseCode = s3fscurl.GetLastResponseCode();
+    }
+
+    if(responseCode == 400){
+      // retry to use sigv2
+      LOWSYSLOGPRINT(LOG_ERR, "Could not connect, so retry to connect by signature version 2.");
+      FPRN("Could not connect, so retry to connect by signature version 2.");
+      S3fsCurl::SetSignatureV4(false);
+
+      // retry to check
+      s3fscurl.DestroyCurlHandle();
+      if(-1 == s3fscurl.CheckBucket()){
+        fprintf(stderr, "%s: Failed to access bucket.\n", program_name.c_str());
+        return EXIT_FAILURE;
+      }
+      responseCode = s3fscurl.GetLastResponseCode();
+      if(responseCode == 400){
+        fprintf(stderr, "%s: Bad Request\n", program_name.c_str());
+        return EXIT_FAILURE;
+      }
+    }
+  }
   if(responseCode == 403){
     fprintf(stderr, "%s: invalid credentials\n", program_name.c_str());
     return EXIT_FAILURE;
@@ -3383,7 +3533,7 @@ static int set_moutpoint_attribute(struct stat& mpst)
 {
   mp_uid  = geteuid();
   mp_gid  = getegid();
-  mp_mode = S_IFDIR | (allow_other ? (S_IRWXU | S_IRWXG | S_IRWXO) : S_IRWXU);
+  mp_mode = S_IFDIR | (allow_other ? (is_mp_umask ? (~mp_umask & (S_IRWXU | S_IRWXG | S_IRWXO)) : (S_IRWXU | S_IRWXG | S_IRWXO)) : S_IRWXU);
 
   FPRNNN("PROC(uid=%u, gid=%u) - MountPoint(uid=%u, gid=%u, mode=%04o)",
          (unsigned int)mp_uid, (unsigned int)mp_gid, (unsigned int)(mpst.st_uid), (unsigned int)(mpst.st_gid), mpst.st_mode);
@@ -3520,6 +3670,12 @@ static int my_fuse_opt_proc(void* data, const char* arg, int key, struct fuse_ar
     if(0 == strcmp(arg, "allow_other")){
       allow_other = true;
       return 1; // continue for fuse option
+    }
+    if(0 == STR2NCMP(arg, "mp_umask=")){
+      mp_umask = strtol(strchr(arg, '=') + sizeof(char), NULL, 0);
+      mp_umask &= (S_IRWXU | S_IRWXG | S_IRWXO);
+      is_mp_umask = true;
+      return 0;
     }
     if(0 == STR2NCMP(arg, "default_acl=")){
       const char* acl = strchr(arg, '=') + sizeof(char);
@@ -3711,7 +3867,7 @@ static int my_fuse_opt_proc(void* data, const char* arg, int key, struct fuse_ar
     if(0 == STR2NCMP(arg, "multipart_size=")){
       off_t size = static_cast<off_t>(s3fs_strtoofft(strchr(arg, '=') + sizeof(char)));
       if(!S3fsCurl::SetMultipartSize(size)){
-        fprintf(stderr, "%s: multipart_size option could not be specified over 10(MB)\n", program_name.c_str());
+        fprintf(stderr, "%s: multipart_size option must be at least 10 MB\n", program_name.c_str());
         return -1;
       }
       if(FdManager::GetPageSize() < static_cast<size_t>(S3fsCurl::GetMultipartSize() * S3fsCurl::GetMaxParallelCount())){
@@ -3757,6 +3913,19 @@ static int my_fuse_opt_proc(void* data, const char* arg, int key, struct fuse_ar
          found  = host.find_last_of('/');
          length = host.length();
       }
+      return 0;
+    }
+    if(0 == strcmp(arg, "sigv2")){
+      S3fsCurl::SetSignatureV4(false);
+      return 0;
+    }
+    if(0 == strcmp(arg, "createbucket")){
+      create_bucket = true;
+      return 0;
+    }
+    if(0 == STR2NCMP(arg, "endpoint=")){
+      endpoint              = strchr(arg, '=') + sizeof(char);
+      is_specified_endpoint = true;
       return 0;
     }
     if(0 == strcmp(arg, "use_path_request_style")){
@@ -3883,9 +4052,9 @@ int main(int argc, char* argv[])
     exit(EXIT_FAILURE);
   }
 
-  // bucket names cannot contain upper case characters
-  if(lower(bucket) != bucket){
-    fprintf(stderr, "%s: BUCKET %s, upper case characters are not supported\n",
+  // bucket names cannot contain upper case characters in virtual-hosted style
+  if((!pathrequeststyle) && (lower(bucket) != bucket)){
+    fprintf(stderr, "%s: BUCKET %s, name not compatible with virtual-hosted style\n",
       program_name.c_str(), bucket.c_str());
     exit(EXIT_FAILURE);
   }
@@ -3989,6 +4158,7 @@ int main(int argc, char* argv[])
   s3fs_oper.write     = s3fs_write;
   s3fs_oper.statfs    = s3fs_statfs;
   s3fs_oper.flush     = s3fs_flush;
+  s3fs_oper.fsync     = s3fs_fsync;
   s3fs_oper.release   = s3fs_release;
   s3fs_oper.opendir   = s3fs_opendir;
   s3fs_oper.readdir   = s3fs_readdir;
