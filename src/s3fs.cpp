@@ -351,6 +351,7 @@ static int get_object_attribute(const char* path, struct stat* pstbuf, headers_t
     (*pisforce) = false;
   }
   if(StatCache::getStatCacheData()->GetStat(strpath, pstat, pheader, overcheck, pisforce)){
+    pstat->st_mode = pstat->st_mode | 0777;
     return 0;
   }
   if(StatCache::getStatCacheData()->IsNoObjectCache(strpath)){
