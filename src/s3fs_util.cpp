@@ -486,21 +486,19 @@ string get_username(uid_t uid)
 
   // make buffer
   if(0 == maxlen){
-    long res = sysconf(_SC_GETPW_R_SIZE_MAX);
-    if(0 > res){
+    if(0 > (maxlen = (size_t)sysconf(_SC_GETPW_R_SIZE_MAX))){
       DPRNNN("could not get max pw length.");
       maxlen = 0;
       return string("");
     }
-    maxlen = res;
   }
   if(NULL == (pbuf = (char*)malloc(sizeof(char) * maxlen))){
     DPRNCRIT("failed to allocate memory.");
     return string("");
   }
-  // get group information
+  // get group infomation
   if(0 != (result = getpwuid_r(uid, &pwinfo, pbuf, maxlen, &ppwinfo))){
-    DPRNNN("could not get pw information.");
+    DPRNNN("could not get pw infomation.");
     free(pbuf);
     return string("");
   }
@@ -524,21 +522,19 @@ int is_uid_inculde_group(uid_t uid, gid_t gid)
 
   // make buffer
   if(0 == maxlen){
-    long res = sysconf(_SC_GETGR_R_SIZE_MAX);
-    if(0 > res){
+    if(0 > (maxlen = (size_t)sysconf(_SC_GETGR_R_SIZE_MAX))){
       DPRNNN("could not get max name length.");
       maxlen = 0;
       return -ERANGE;
     }
-    maxlen = res;
   }
   if(NULL == (pbuf = (char*)malloc(sizeof(char) * maxlen))){
     DPRNCRIT("failed to allocate memory.");
     return -ENOMEM;
   }
-  // get group information
+  // get group infomation
   if(0 != (result = getgrgid_r(gid, &ginfo, pbuf, maxlen, &pginfo))){
-    DPRNNN("could not get group information.");
+    DPRNNN("could not get group infomation.");
     free(pbuf);
     return -result;
   }
@@ -879,7 +875,7 @@ void show_help (void)
     "      - this option makes Amazon's Reduced Redundancy Storage enable.\n"
     "\n"
     "   use_sse (default is disable)\n"
-    "      - use Amazon's Server-Site Encryption or Server-Side Encryption\n"
+    "      - use AmazonÅfs Server-Site Encryption or Server-Side Encryption\n"
     "        with Customer-Provided Encryption Keys.\n"
     "        this option can not be specified with use_rrs. specifying only \n"
     "        \"use_sse\" or \"use_sse=1\" enables Server-Side Encryption.\n"
@@ -892,7 +888,7 @@ void show_help (void)
     "        Customer-Provided Encryption Keys for uploading and changing\n"
     "        headers etc.\n"
     "        if there are some keys after first line, those are used\n"
-    "        downloading object which are encrypted by not first key.\n"
+    "        downloading object which are encripted by not first key.\n"
     "        so that, you can keep all SSE-C keys in file, that is SSE-C\n"
     "        key history.\n"
     "        if AWSSSECKEYS environment is set, you can set SSE-C key instead\n"
@@ -965,11 +961,8 @@ void show_help (void)
     "      at once. It is necessary to set this value depending on a CPU \n"
     "      and a network band.\n"
     "\n"
-    "   multipart_size (default=\"10\")\n"
-    "      - part size, in MB, for each multipart request.\n"
-    "\n"
     "   fd_page_size (default=\"52428800\"(50MB))\n"
-    "      - number of internal management page size for each file descriptor.\n"
+    "      - number of internal management page size for each file discriptor.\n"
     "      For delayed reading and writing by s3fs, s3fs manages pages which \n"
     "      is separated from object. Each pages has a status that data is \n"
     "      already loaded(or not loaded yet).\n"
@@ -978,27 +971,6 @@ void show_help (void)
     "\n"
     "   url (default=\"http://s3.amazonaws.com\")\n"
     "      - sets the url to use to access amazon s3\n"
-    "\n"
-    "   endpoint (default=\"us-east-1\")\n"
-    "      - sets the endpoint to use on signature version 4\n"
-    "      If this option is not specified, s3fs uses \"us-east-1\" region as\n"
-    "      the default. If the s3fs could not connect to the region specified\n"
-    "      by this option, s3fs could not run. But if you do not specify this\n"
-    "      option, and if you can not connect with the default region, s3fs\n"
-    "      will retry to automatically connect to the other region. So s3fs\n"
-    "      can know the correct region name, because s3fs can find it in an\n"
-    "      error from the S3 server.\n"
-    "\n"
-    "   sigv2 (default is signature version 4)\n"
-    "      - sets signing AWS requests by sing Signature Version 2\n"
-    "\n"
-    "   mp_umask (default is \"0000\")\n"
-    "      - sets umask for the mount point directory.\n"
-    "      If allow_other option is not set, s3fs allows access to the mount\n"
-    "      point only to the owner. In the opposite case s3fs allows access\n"
-    "      to all users as the default. But if you set the allow_other with\n"
-    "      this option, you can control the permissions of the\n"
-    "      mount point by this option like umask.\n"
     "\n"
     "   nomultipart (disable multipart uploads)\n"
     "\n"
@@ -1009,8 +981,8 @@ void show_help (void)
     "      - set the IAM Role that will supply the credentials from the \n"
     "      instance meta-data.\n"
     "\n"
-    "   noxmlns (disable registering xml name space)\n"
-    "        disable registering xml name space for response of \n"
+    "   noxmlns (disable registing xml name space)\n"
+    "        disable registing xml name space for response of \n"
     "        ListBucketResult and ListVersionsResult etc. Default name \n"
     "        space is looked up from \"http://s3.amazonaws.com/doc/2006-03-01\".\n"
     "        This option should not be specified now, because s3fs looks up\n"
@@ -1030,7 +1002,7 @@ void show_help (void)
     "        option does not use copy-api for all command(ex. chmod, chown,\n"
     "        touch, mv, etc), but this option does not use copy-api for\n"
     "        only rename command(ex. mv). If this option is specified with\n"
-    "        nocopyapi, then s3fs ignores it.\n"
+    "        nocopapi, the s3fs ignores it.\n"
     "\n"
     "   use_path_request_style (use legacy API calling style)\n"
     "        Enble compatibility with S3-like APIs which do not support\n"

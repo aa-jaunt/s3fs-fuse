@@ -139,38 +139,7 @@ string urlEncode(const string &s)
       result += hexAlphabet[static_cast<unsigned char>(s[i]) % 16];
     }
   }
-  return result;
-}
 
-/**
- * urlEncode a fuse path,
- * taking into special consideration "/",
- * otherwise regular urlEncode.
- */
-string urlEncode2(const string &s)
-{
-  string result;
-  for (unsigned i = 0; i < s.length(); ++i) {
-    if (s[i] == '=') { // Note- special case for fuse paths...
-      result += s[i];
-    }else if (s[i] == '&') { // Note- special case for s3...
-      result += s[i];
-    }else if(s[i] == '%'){
-      result += s[i];
-    } else if (isalnum(s[i])) {
-      result += s[i];
-    } else if (s[i] == '.' || s[i] == '-' || s[i] == '*' || s[i] == '_') {
-      result += s[i];
-    } else if (s[i] == ' ') {
-      result += '%';
-      result += '2';
-      result += '0';
-    } else {
-      result += "%";
-      result += hexAlphabet[static_cast<unsigned char>(s[i]) / 16];
-      result += hexAlphabet[static_cast<unsigned char>(s[i]) % 16];
-    }
-  }
   return result;
 }
 
@@ -200,36 +169,52 @@ bool get_keyword_value(string& target, const char* keyword, string& value)
   return true;
 }
 
+string prepare_url(const char* url)
+{
+  FPRNINFO("URL is %s", url);
+
+  string uri;
+  string host;
+  string path;
+  string url_str = str(url);
+  string token =  str("/" + bucket);
+  int bucket_pos = url_str.find(token);
+  int bucket_length = token.size();
+  int uri_length = 7;
+
+  if(!strncasecmp(url_str.c_str(), "https://", 8)){
+    uri_length = 8;
+  }
+  uri  = url_str.substr(0, uri_length);
+
+  if(!pathrequeststyle){
+    host = bucket + "." + url_str.substr(uri_length, bucket_pos - uri_length).c_str();
+    path = url_str.substr((bucket_pos + bucket_length));
+  }else{
+    host = url_str.substr(uri_length, bucket_pos - uri_length).c_str();
+    string part = url_str.substr((bucket_pos + bucket_length));
+    if('/' != part[0]){
+      part = "/" + part;
+    }
+    path = "/" + bucket + part;
+  }
+
+  url_str = uri + host + path;
+
+  FPRNINFO("URL changed is %s", url_str.c_str());
+
+  return str(url_str);
+}
+
 /**
  * Returns the current date
  * in a format suitable for a HTTP request header.
  */
-string get_date_rfc850()
+string get_date()
 {
   char buf[100];
   time_t t = time(NULL);
   strftime(buf, sizeof(buf), "%a, %d %b %Y %H:%M:%S GMT", gmtime(&t));
-  return buf;
-}
-
-void get_date_sigv3(string& date, string& date8601)
-{
-  time_t tm = time(NULL);
-  date     = get_date_string(tm);
-  date8601 = get_date_iso8601(tm);
-}
-
-string get_date_string(time_t tm)
-{
-  char buf[100];
-  strftime(buf, sizeof(buf), "%Y%m%d", gmtime(&tm));
-  return buf;
-}
-
-string get_date_iso8601(time_t tm)
-{
-  char buf[100];
-  strftime(buf, sizeof(buf), "%Y%m%dT%H%M%SZ", gmtime(&tm));
   return buf;
 }
 

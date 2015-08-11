@@ -19,7 +19,6 @@
  */
 
 #include <stdio.h>
-#include <stdlib.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/time.h>
@@ -42,20 +41,17 @@
 #include "common.h"
 #include "fdcache.h"
 #include "s3fs.h"
-
-#include "libs3.h"
 #include "s3fs_util.h"
 #include "string_util.h"
 #include "curl.h"
 
 using namespace std;
 
-
 //------------------------------------------------
 // Symbols
 //------------------------------------------------
 #define MAX_MULTIPART_CNT   10000                   // S3 multipart max count
-#define FDPAGE_SIZE         (50 * 1024 * 1024)      // 50MB(parallel uploading is 5 parallel(default) * 10 MB)
+#define	FDPAGE_SIZE	    (50 * 1024 * 1024)      // 50MB(parallel uploading is 5 parallel(default) * 10 MB)
 
 //------------------------------------------------
 // CacheFileStat class methods
@@ -191,102 +187,6 @@ bool CacheFileStat::Release(void)
 
   return true;
 }
-static S3Status getObjectDataCallback(int bufferSize, const char *buffer, void *callbackData)
-{
-  ReadAhead * reader = (ReadAhead *) callbackData;
-  memcpy(reader->buffer, buffer, bufferSize);
-  if (bufferSize != reader->capacity) {
-    reader->eof = true;
-  }
-  reader->size = bufferSize;
-  return S3StatusOK;
-
-}
-
-ReadAhead::ReadAhead() {
-  S3Status status;
-    
-  if ((status = S3_initialize("s3", S3_INIT_ALL, "s3.amazonaws.com")) != S3StatusOK) {
-        fprintf(stderr, "Failed to initialize libs3: %s\n", 
-                S3_get_status_name(status));
-  }
-  initialize(0);
-}
-
-void ReadAhead::initialize(long offset) {
-  position     = 0;
-  size         = 0;
-  file_offset  = offset;
-  capacity     = MAX_BUFFER_SIZE;
-  eof = false;
-}
-
-S3ResponseHandler responseHandler =
-{
-        0,
-        0
-};
-S3GetObjectHandler getObjectHandler =
-{
-        responseHandler,
-        &getObjectDataCallback
-};
-void ReadAhead::repopulate(long offset) {
-  // here we repopulate buffer to capacity starting from offset point
-  S3BucketContext bucketContext =
-    {
-        0,
-        "medusa.jauntvr.com",
-        S3ProtocolHTTP,
-        S3UriStylePath,
-        "",
-        ""
-    };
-
-  S3_get_object(&bucketContext, "test", NULL, offset, capacity, NULL, &getObjectHandler, this); 
-  return; 
-}
-long ReadAhead::readData(char* data, long offset, long length) {
-  if (offset < 0) {
-      return 0;
-  }
-  long delta_offset = offset -file_offset;
-  
-  if ( delta_offset < 0 || delta_offset >= size) {
-      initialize(offset);
-      return readData(data, offset, length);
-  } else if ( delta_offset < size && delta_offset != 0) {
-      position = (position + delta_offset)%capacity;
-      size -= delta_offset;
-      file_offset = offset;
-      return readData(data, offset, length);
-  }
-
-  // at this point file_offset == offset and size >= 0
-  if ( length <= size ) {
-      // this is simple, just copy data possible in two steps because of data wrap
-      long endpoint = position + length;
-      if (endpoint < capacity) {
-          memcpy(data, buffer + position, length);
-      } else {
-          long part2 = endpoint%capacity;
-          memcpy(data, buffer + position,  length-part2);
-          memcpy(data+length-part2, buffer, part2); 
-      } 
-      return length;
-  } 
-   // read whatever in the buffer now and then reinitialize and repopulate buffer
-   readData(data, offset, size);
-   offset += size;
-   data   += size;
-   repopulate(offset);
-   if ( size < capacity ) {
-      //reached end of file
-      return readData(data, offset, size);
-   }
-   long part_length = readData(data, offset, length -size);
-   return size + part_length;
-}
 
 //------------------------------------------------
 // PageList methods
@@ -301,6 +201,7 @@ void PageList::FreeList(fdpage_list_t& list)
 
 PageList::PageList(off_t size, bool is_init)
 {
+  printf("in PageList constructor with size set to %jd\n", size);
   Init(size, is_init);
 }
 
@@ -320,6 +221,8 @@ off_t PageList::Size(void) const
 
 int PageList::Resize(off_t size, bool is_init)
 {
+
+  printf("RESIZING PAGE LIST\n");
   off_t total = Size();
 
   if(0 == total){
@@ -362,9 +265,11 @@ void PageList::Clear(void)
 
 int PageList::Init(off_t size, bool is_init)
 {
+  printf("INITIALIZING PAGE LIST\n");
   Clear();
   for(off_t total = 0; total < size; total += FdManager::GetPageSize()){
     size_t areasize = (total + static_cast<off_t>(FdManager::GetPageSize())) < size ? FdManager::GetPageSize() : static_cast<size_t>(size - total);
+    printf("a page with offset %jd and size %zu\n", total, areasize);
     fdpage* page    = new fdpage(total, areasize, is_init);
     pages.push_back(page);
   }
@@ -444,26 +349,20 @@ bool PageList::FindUninitPage(off_t start, off_t& resstart, size_t& ressize)
   return false;
 }
 
-int PageList::GetUninitPages(fdpage_list_t& uninit_list, off_t start, off_t size)
+int PageList::GetUninitPages(fdpage_list_t& uninit_list, off_t start, bool clean)
 {
   for(fdpage_list_t::iterator iter = pages.begin(); iter != pages.end(); iter++){
     if(start <= (*iter)->end()){
-      if((start + size) <= (*iter)->offset){
-        // reach to end
-        break;
-      }
       // after start pos
       if(!(*iter)->init){
         // found uninitialized area
-        //fdpage_list_t::reverse_iterator riter = uninit_list.rbegin();
-        //if(riter != uninit_list.rend() && (*riter)->next() == (*iter)->offset){
-          // merge to before page
-          //(*riter)->bytes += (*iter)->bytes;
-        //}else{
-          fdpage* page = new fdpage((*iter)->offset, (*iter)->bytes, false);
-          uninit_list.push_back(page);
-        //}
+        fdpage* page = new fdpage((*iter)->offset, (*iter)->bytes, false);
+        uninit_list.push_back(page);
       }
+    }
+    else if (clean) {
+      //remove local cache
+      
     }
   }
   return uninit_list.size();
@@ -592,6 +491,7 @@ void PageList::Dump(void)
 FdEntity::FdEntity(const char* tpath, const char* cpath)
           : is_lock_init(false), path(SAFESTRPTR(tpath)), cachepath(SAFESTRPTR(cpath)), fd(-1), file(NULL), is_modify(false)
 {
+  printf("S3 path is %s, cache path is %s\n", tpath, cpath);
   try{
     pthread_mutex_init(&fdent_lock, NULL);
     is_lock_init = true;
@@ -617,13 +517,14 @@ FdEntity::~FdEntity()
 void FdEntity::Clear(void)
 {
   AutoLock auto_lock(&fdent_lock);
-
+  printf("CLEARING ENTITY, file set to %s\n", file ?"true":"false");
   if(file){
     if(0 != cachepath.size()){
       CacheFileStat cfstat(path.c_str());
       if(!pagelist.Serialize(cfstat, true)){
         DPRN("failed to save cache stat file(%s).", path.c_str());
       }
+      printf("saved cached file in %s", path.c_str());
     }
     fclose(file);
     file = NULL;
@@ -739,6 +640,7 @@ int FdEntity::Open(off_t size, time_t time)
 
     }else{
       // open temporary file
+      printf("Opening Temporary file\n");
       if(NULL == (file = tmpfile()) || -1 ==(fd = fileno(file))){
         DPRN("failed to open tmp file. err(%d)", errno);
         if(file){
@@ -884,9 +786,9 @@ bool FdEntity::SetAllStatus(bool is_enable)
 int FdEntity::Load(off_t start, off_t size)
 {
   int result = 0;
-
+  printf("inside load\n");
   FPRNINFO("[path=%s][fd=%d][offset=%jd][size=%jd]", path.c_str(), fd, (intmax_t)start, (intmax_t)size);
-
+  printf("inside load starting byte %jd, size of read %zu\n", start, size);
   if(-1 == fd){
     return -EBADF;
   }
@@ -894,8 +796,10 @@ int FdEntity::Load(off_t start, off_t size)
 
   // check loaded area & load
   fdpage_list_t uninit_list;
-  if(0 < pagelist.GetUninitPages(uninit_list, start, size)){
+  if(0 < pagelist.GetUninitPages(uninit_list, start, true)){
+     printf("GOT uninitialized pages\n");
     for(fdpage_list_t::iterator iter = uninit_list.begin(); iter != uninit_list.end(); iter++){
+      printf("iter offset %zu, bytes %jd, FDManager Page Size %jd\n", (*iter)->offset, (*iter)->bytes, FdManager::GetPageSize());
       if(-1 != size && (start + size) <= (*iter)->offset){
         break;
       }
@@ -925,6 +829,7 @@ int FdEntity::Load(off_t start, off_t size)
     }
     PageList::FreeList(uninit_list);
   }
+  printf("FINISHED LOAD!!!\n");
   return result;
 }
 
@@ -1031,9 +936,9 @@ ssize_t FdEntity::Read(char* bytes, off_t start, size_t size, bool force_load)
 {
   int     result;
   ssize_t rsize;
-
+  printf("Force Load is %s\n", force_load? "True":"False");
   FPRNINFO("[path=%s][fd=%d][offset=%jd][size=%zu]", path.c_str(), fd, (intmax_t)start, size);
-
+  printf("starting byte %jd, size of read %zu\n", start, size);
   if(-1 == fd){
     return -EBADF;
   }
@@ -1092,24 +997,6 @@ ssize_t FdEntity::Write(const char* bytes, off_t start, size_t size)
   }
   return wsize;
 }
-
-//------------------------------------------------
-// FdManager symbol
-//------------------------------------------------
-// [NOTE]
-// NOCACHE_PATH_PREFIX symbol needs for not using cache mode.
-// Now s3fs I/F functions in s3fs.cpp has left the processing
-// to FdManager and FdEntity class. FdManager class manages
-// the list of local file stat and file discriptor in conjunction
-// with the FdEntity class.
-// When s3fs is not using local cache, it means FdManager must
-// return new temporary file discriptor at each opening it.
-// Then FdManager caches fd by key which is dummy file path
-// instead of real file path.
-// This process may not be complete, but it is easy way can
-// be realized.
-//
-#define NOCACHE_PATH_PREFIX_FORM    " __S3FS_UNEXISTED_PATH_%lx__ / "      // important space words for simply
 
 //------------------------------------------------
 // FdManager class valiable
@@ -1204,16 +1091,6 @@ bool FdManager::MakeCachePath(const char* path, string& cache_path, bool is_crea
   return true;
 }
 
-bool FdManager::MakeRandomTempPath(const char* path, string& tmppath)
-{
-  char szBuff[64];
-
-  sprintf(szBuff, NOCACHE_PATH_PREFIX_FORM, random());     // warry for performance, but maybe don't warry.
-  tmppath  = szBuff;
-  tmppath += path ? path : "";
-  return true;
-}
-
 //------------------------------------------------
 // FdManager methods
 //------------------------------------------------
@@ -1254,9 +1131,9 @@ FdManager::~FdManager()
   }
 }
 
-FdEntity* FdManager::GetFdEntity(const char* path, int existfd)
+FdEntity* FdManager::GetFdEntity(const char* path)
 {
-  FPRNINFO("[path=%s][fd=%d]", SAFESTRPTR(path), existfd);
+  FPRNINFO("[path=%s]", SAFESTRPTR(path));
 
   if(!path || '\0' == path[0]){
     return NULL;
@@ -1264,24 +1141,10 @@ FdEntity* FdManager::GetFdEntity(const char* path, int existfd)
   AutoLock auto_lock(&FdManager::fd_manager_lock);
 
   fdent_map_t::iterator iter = fent.find(string(path));
-  if(fent.end() != iter && (-1 == existfd || (*iter).second->GetFd() == existfd)){
-    return (*iter).second;
+  if(fent.end() == iter){
+    return NULL;
   }
-
-  if(-1 != existfd){
-    for(iter = fent.begin(); iter != fent.end(); iter++){
-      if((*iter).second && (*iter).second->GetFd() == existfd){
-        // found opend fd in map
-        if(0 == strcmp((*iter).second->GetPath(), path)){
-          return (*iter).second;
-        }
-        // found fd, but it is used another file(file discriptor is recycled)
-        // so returns NULL.
-        break;
-      }
-    }
-  }
-  return NULL;
+  return (*iter).second;
 }
 
 FdEntity* FdManager::Open(const char* path, off_t size, time_t time, bool force_tmpfile, bool is_create)
@@ -1310,22 +1173,8 @@ FdEntity* FdManager::Open(const char* path, off_t size, time_t time, bool force_
     }
     // make new obj
     ent = new FdEntity(path, cache_path.c_str());
+    fent[string(path)] = ent;
 
-    if(0 < cache_path.size()){
-      // using cache
-      fent[string(path)] = ent;
-    }else{
-      // not using cache, so the key of fdentity is set not really existsing path.
-      // (but not strictly unexisting path.)
-      //
-      // [NOTE]
-      // The reason why this process here, please look at the definition of the
-      // comments of NOCACHE_PATH_PREFIX_FORM symbol.
-      //
-      string tmppath("");
-      FdManager::MakeRandomTempPath(path, tmppath);
-      fent[tmppath] = ent;
-    }
   }else{
     return NULL;
   }
@@ -1335,50 +1184,6 @@ FdEntity* FdManager::Open(const char* path, off_t size, time_t time, bool force_
     return NULL;
   }
   return ent;
-}
-
-FdEntity* FdManager::ExistOpen(const char* path, int existfd)
-{
-  FPRNINFO("[path=%s][fd=%d]", SAFESTRPTR(path), existfd);
-
-  // search by real path
-  FdEntity* ent = Open(path, -1, -1, false, false);
-
-  if(!ent && -1 != existfd){
-    // search from all fdentity because of not using cache.
-    AutoLock auto_lock(&FdManager::fd_manager_lock);
-
-    for(fdent_map_t::iterator iter = fent.begin(); iter != fent.end(); iter++){
-      if((*iter).second && (*iter).second->GetFd() == existfd && (*iter).second->IsOpen()){
-        // found opend fd in map
-        if(0 == strcmp((*iter).second->GetPath(), path)){
-          ent = (*iter).second;
-          // open
-          if(-1 == ent->Open(-1, -1)){
-            return NULL;
-          }
-        }else{
-          // found fd, but it is used another file(file discriptor is recycled)
-          // so returns NULL.
-        }
-        break;
-      }
-    }
-  }
-  return ent;
-}
-
-void FdManager::Rename(const std::string &from, const std::string &to)
-{
-  fdent_map_t::iterator iter = fent.find(from);
-  if(fent.end() != iter){
-    // found
-    FPRNINFO("[from=%s][to=%s]", from.c_str(), to.c_str());
-    FdEntity* ent = (*iter).second;
-    fent.erase(iter);
-    ent->SetPath(to);
-    fent[to] = ent;
-  }
 }
 
 bool FdManager::Close(FdEntity* ent)

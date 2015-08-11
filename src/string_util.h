@@ -25,7 +25,6 @@
  */
 #include <string.h>
 #include <syslog.h>
-#include <sys/types.h>
 
 #include <string>
 #include <sstream>
@@ -46,12 +45,9 @@ std::string trim_right(const std::string &s, const std::string &t = SPACES);
 std::string trim(const std::string &s, const std::string &t = SPACES);
 std::string lower(std::string s);
 std::string IntToStr(int);
-std::string get_date_rfc850(void);
-void get_date_sigv3(std::string& date, std::string& date8601);
-std::string get_date_string(time_t tm);
-std::string get_date_iso8601(time_t tm);
+std::string get_date();
 std::string urlEncode(const std::string &s);
-std::string urlEncode2(const std::string &s);
+std::string prepare_url(const char* url);
 bool get_keyword_value(std::string& target, const char* keyword, std::string& value);
 
 #endif // S3FS_STRING_UTIL_H_
